@@ -1,16 +1,11 @@
 import pymysql.cursors
 import boto3
 import logging, sys
-import json
+import math
 from datetime import datetime
-from datetime import timedelta
+import os, time
 
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
-
-
-# WIGGLE_ROOM is the amount that Com_Select can increase by without me considering the server to be 'busy'
-# seems like it increases by 14 just by running this check
-WIGGLE_ROOM = 60
 
 # handler for pulling config from SSM
 def getSSMParameter(ssmClient, path, encryptionOption=False):
@@ -33,108 +28,59 @@ def isIdleExempt(rds, instance):
     return False
 
 
-def updateIdle(ssmClient, lastSelect, instance, idleValue):
-    lastSelect["selectCount"] = int(idleValue) + WIGGLE_ROOM
-    lastSelect["timestamp"] = datetime.now()
-    ssmClient.put_parameter(
-        Name="/platform/rds-idle-shutdown-" + instance["Endpoint"]["Address"],
-        Value=json.dumps(lastSelect, default=str),
-        Overwrite=True,
-        Type="String",
-    )
-    logging.warning(
-        "%s: Wrote updated check to path %s",
-        instance["Endpoint"]["Address"],
-        "/platform/rds-idle-shutdown-" + instance["Endpoint"]["Address"],
-    )
-
-
-def isIdle(ssmClient, lastSelect, instance, cursor):
-    sqlSelect = 'show global status like "Com_select"'
-    cursor.execute(sqlSelect)
+def isIdle(instance, cursor, user):
+    sqlSelect = "select event_time as db_last_command_time, user_host from mysql.general_log where user_host not like %s and user_host not like %s order by event_time desc limit 1"
+    cursor.execute(sqlSelect, ("%rdsadmin%", "%" + user + "%"))
     result = cursor.fetchone()
 
-    if "Value" in result.keys():
+    if "db_last_command_time" in result.keys():
         # have queries been processsed since last check?
-        if int(result["Value"]) < (int(lastSelect["selectCount"]) + WIGGLE_ROOM):
-            # if uptime is less than last timestamp, its been rebooted
-            # therefore return False but also updateIdle for next run
+        sqlSelectNow = "select now()"
+        cursor.execute(sqlSelectNow)
+        resultNow = cursor.fetchone()
+        elapsed = resultNow["now()"] - result["db_last_command_time"]
+        if math.floor(elapsed.total_seconds() / (60 * 60)) < 1:
+            # its been less than 1 hour since a command was executed
+            logging.warning(
+                "%s: Processed last command less than 1 hour ago, at %s",
+                instance["Endpoint"]["Address"],
+                result["db_last_command_time"],
+            )
+
+            # returns False because the instance is not idle
+            return False
+        else:
+            # its been more than an hour since a command was executed
+            # but how long has the server been up? if less than an hour, give it a stay of execution
             sqlUptime = "select TIME_FORMAT(SEC_TO_TIME(VARIABLE_VALUE ),'%H') as hours, TIME_FORMAT(SEC_TO_TIME(VARIABLE_VALUE ),'%i') as minutes from performance_schema.global_status      where VARIABLE_NAME='Uptime'"
             cursor.execute(sqlUptime)
             uptimeResult = cursor.fetchone()
-            startupTime = datetime.now() - timedelta(
-                hours=int(uptimeResult["hours"]), minutes=int(uptimeResult["minutes"])
-            )
 
-            if startupTime > lastSelect["timestamp"]:
-                # started up more recently than last select
-                # eg. lastSelect is 19/07 8pm
-                # startupTime is 20/07 11:30am
-                # therefore RDS was recently started
+            if int(uptimeResult["hours"]) < 1:
+                # started up less than an hour ago
                 logging.warning(
-                    "%s: Recently started up, assuming not idle.  Server has been up for %s hours %s minutes",
+                    "%s: Server has been online less than an hour.  Uptime is %s hours %s minutes",
                     instance["Endpoint"]["Address"],
                     uptimeResult["hours"],
                     uptimeResult["minutes"],
                 )
-                updateIdle(
-                    ssmClient=ssmClient,
-                    lastSelect=lastSelect,
-                    instance=instance,
-                    idleValue=result["Value"],
-                )
+
+                # hasn't executed stuff since it came online, but hasn't been online long enough to really call it idle
                 return False
             else:
-                # versus lastSelect 20/07 at 10am and startupTime was 16/07 8pm - lastSelect is more recent, so no restart/start has occurred
+                # no commands in an hour and has been online for at least an hour, so its idle
                 logging.warning(
-                    "%s: Did not start up recently.  Server has been up for %s hours %s minutes",
+                    "%s: Deemed idle.  Server has been up for %s hours %s minutes, last command executed %s",
                     instance["Endpoint"]["Address"],
                     uptimeResult["hours"],
                     uptimeResult["minutes"],
+                    result["db_last_command_time"],
                 )
 
-            # no queries since last run
-            if (datetime.now() - timedelta(hours=1)) > lastSelect["timestamp"]:
-                logging.warning(
-                    "%s: No queries for more than 1 hour",
-                    instance["Endpoint"]["Address"],
-                )
-                updateIdle(
-                    ssmClient=ssmClient,
-                    lastSelect=lastSelect,
-                    instance=instance,
-                    idleValue=result["Value"],
-                )
                 return True
-            else:
-                logging.warning(
-                    "%s: No queries but last check was less than 1 hour ago, not enough time has elapsed to assume idle",
-                    instance["Endpoint"]["Address"],
-                )
-                updateIdle(
-                    ssmClient=ssmClient,
-                    lastSelect=lastSelect,
-                    instance=instance,
-                    idleValue=result["Value"],
-                )
-                return False
-
-        else:
-            # queries have happened, so its not idle
-            logging.warning(
-                "%s: Instance has processed more queries.  DB: %s vs SSM parameter: %s",
-                instance["Endpoint"]["Address"],
-                result["Value"],
-                lastSelect["selectCount"],
-            )
-            updateIdle(
-                ssmClient=ssmClient,
-                lastSelect=lastSelect,
-                instance=instance,
-                idleValue=result["Value"],
-            )
-            return False
-
+    logging.error(
+        "%s: Database did not return result!", instance["Endpoint"]["Address"]
+    )
     return False
 
 
@@ -162,7 +108,6 @@ def lambda_handler(event, context):
 
                     rdsInstances.append(dbinstance)
 
-                    # show status where variable_name = 'threads_connected';
     except Exception as e:
         print("Failed to enumerate RDS instances. Traceback follows.")
         print(str(e))
@@ -180,12 +125,14 @@ def lambda_handler(event, context):
         # check if its online
         if instance["DBInstanceStatus"] == "available":
             # try connect to it
+            # hold on to user - its used later
+            user = getSSMParameter(
+                ssmClient=ssmClient,
+                path="/platform/rds-idle-shutdown-username",
+            )
             mydb = pymysql.connect(
                 host=instance["Endpoint"]["Address"],
-                user=getSSMParameter(
-                    ssmClient=ssmClient,
-                    path="/platform/rds-idle-shutdown-username",
-                ),
+                user=user,
                 password=getSSMParameter(
                     ssmClient=ssmClient,
                     path="/platform/rds-idle-shutdown-password",
@@ -197,51 +144,15 @@ def lambda_handler(event, context):
 
             with mydb:
                 with mydb.cursor() as cursor:
-                    # look up last select count
-                    # returns a dict
-                    # lastSelect['selectCount'] = nnn
-                    # lastSelect['timestamp'] = yyyy-mm-dd hh-mm
-                    lastSelect = {}
-                    try:
-                        lastSelect = json.loads(
-                            getSSMParameter(
-                                ssmClient=ssmClient,
-                                path="/platform/rds-idle-shutdown-"
-                                + instance["Endpoint"]["Address"],
-                            )
-                        )
-
-                        # need to format the date as an object
-                        lastSelect["timestamp"] = datetime.strptime(
-                            lastSelect["timestamp"], "%Y-%m-%d %H:%M:%S.%f"
-                        )
-
-                        logging.warning(
-                            "%s: Successfully pulled last idle result from SSM",
-                            instance["Endpoint"]["Address"],
-                        )
-
-                    except:
-                        # couldn't find it, so assume its a new RDS instance
-                        lastSelect["selectCount"] = 0
-                        lastSelect["timestamp"] = datetime.now()
-                        logging.warning(
-                            "%s:Unable to pull last idle result from SSM.  Searched key was %s.  New RDS instance?",
-                            instance["Endpoint"]["Address"],
-                            "/platform/rds-idle-shutdown-"
-                            + instance["Endpoint"]["Address"],
-                        )
-
                     if isIdle(
                         cursor=cursor,
-                        lastSelect=lastSelect,
                         instance=instance,
-                        ssmClient=ssmClient,
+                        user=user,
                     ):
                         try:
-                            rds.stop_db_instance(
-                                DBInstanceIdentifier=instance["DBInstanceIdentifier"]
-                            )
+                            # rds.stop_db_instance(
+                            #    DBInstanceIdentifier=instance["DBInstanceIdentifier"]
+                            # )
                             print(
                                 "%s: Instance is idle.  Successfully issued shutdown command.",
                                 instance["Endpoint"]["Address"],

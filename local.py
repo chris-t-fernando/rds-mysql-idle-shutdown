@@ -2,8 +2,6 @@ import pymysql.cursors
 import boto3
 import logging, sys
 import math
-from datetime import datetime
-import os, time
 
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
@@ -96,12 +94,12 @@ def lambda_handler(event, context):
         for page in paginator:
             for dbinstance in page["DBInstances"]:
                 if isIdleExempt(rds=rds, instance=dbinstance):
-                    logging.info(
+                    logging.warning(
                         "%s: Instance is exempt from idle shutdown",
                         dbinstance["Endpoint"]["Address"],
                     )
                 else:
-                    logging.info(
+                    logging.warning(
                         "%s: Instance is NOT exempt from idle shutdown",
                         dbinstance["Endpoint"]["Address"],
                     )
@@ -120,7 +118,7 @@ def lambda_handler(event, context):
     # if the instance is online, see if its been idle
     # if it has, turn it off
     for instance in rdsInstances:
-        logging.debug("%s: Checking instance", instance["Endpoint"]["Address"])
+        logging.warning("%s: Checking instance", instance["Endpoint"]["Address"])
 
         # check if its online
         if instance["DBInstanceStatus"] == "available":
@@ -150,9 +148,9 @@ def lambda_handler(event, context):
                         user=user,
                     ):
                         try:
-                            # rds.stop_db_instance(
-                            #    DBInstanceIdentifier=instance["DBInstanceIdentifier"]
-                            # )
+                            rds.stop_db_instance(
+                                DBInstanceIdentifier=instance["DBInstanceIdentifier"]
+                            )
                             print(
                                 "%s: Instance is idle.  Successfully issued shutdown command.",
                                 instance["Endpoint"]["Address"],
@@ -174,6 +172,5 @@ def lambda_handler(event, context):
                 "%s: Instance is not powered on.  Ignoring.",
                 instance["Endpoint"]["Address"],
             )
-
 
 lambda_handler("blah", "blah")

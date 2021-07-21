@@ -20,9 +20,13 @@ def isIdleExempt(rds, instance):
         if str(tag["Key"]).upper() == "RDS_IDLE_EXEMPT":
             if str(tag["Value"]).upper() == "TRUE":
                 return True
+            elif str(tag["Value"]).upper() == "FALSE":
+                return False
             else:
+                logging.warning('%s: Found tag RDS_IDLE_EXEMPT but value was not TRUE or FALSE, so defaulting to NOT idle exempt.  Found value was %s', instance["Endpoint"]["Address"], tag["Value"])
                 return False
     # nothing found so assume not exempt
+    logging.warning('%s: Unable to find tag RDS_IDLE_EXEMPT, so defaulting to NOT idle exempt', instance["Endpoint"]["Address"])
     return False
 
 
@@ -94,12 +98,12 @@ def lambda_handler(event, context):
         for page in paginator:
             for dbinstance in page["DBInstances"]:
                 if isIdleExempt(rds=rds, instance=dbinstance):
-                    logging.info(
+                    logging.warning(
                         "%s: Instance is exempt from idle shutdown",
                         dbinstance["Endpoint"]["Address"],
                     )
                 else:
-                    logging.info(
+                    logging.warning(
                         "%s: Instance is NOT exempt from idle shutdown",
                         dbinstance["Endpoint"]["Address"],
                     )
@@ -118,7 +122,7 @@ def lambda_handler(event, context):
     # if the instance is online, see if its been idle
     # if it has, turn it off
     for instance in rdsInstances:
-        logging.debug("%s: Checking instance", instance["Endpoint"]["Address"])
+        logging.warning("%s: Checking instance", instance["Endpoint"]["Address"])
 
         # check if its online
         if instance["DBInstanceStatus"] == "available":

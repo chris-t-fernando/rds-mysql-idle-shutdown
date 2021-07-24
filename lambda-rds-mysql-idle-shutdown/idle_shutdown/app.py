@@ -2,8 +2,7 @@ import pymysql.cursors
 import boto3
 import logging, sys
 import math
-
-logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+import json
 
 # handler for pulling config from SSM
 def getSSMParameter(ssmClient, path, encryptionOption=False):
@@ -23,10 +22,14 @@ def isIdleExempt(rds, instance):
             elif str(tag["Value"]).upper() == "FALSE":
                 return False
             else:
-                logging.warning('%s: Found tag RDS_IDLE_EXEMPT but value was not TRUE or FALSE, so defaulting to NOT idle exempt.  Found value was %s', instance["Endpoint"]["Address"], tag["Value"])
+                logging.warning(
+                    f'{instance["Endpoint"]["Address"]}: Found tag RDS_IDLE_EXEMPT but value was not TRUE or FALSE, so defaulting to NOT idle exempt.  Found value was {tag["Value"]}'
+                )
                 return False
     # nothing found so assume not exempt
-    logging.warning('%s: Unable to find tag RDS_IDLE_EXEMPT, so defaulting to NOT idle exempt', instance["Endpoint"]["Address"])
+    logging.warning(
+        f'{instance["Endpoint"]["Address"]}: Unable to find tag RDS_IDLE_EXEMPT, so defaulting to NOT idle exempt'
+    )
     return False
 
 
@@ -44,13 +47,12 @@ def isIdle(instance, cursor, user):
         if math.floor(elapsed.total_seconds() / (60 * 60)) < 1:
             # its been less than 1 hour since a command was executed
             logging.warning(
-                "%s: Processed last command less than 1 hour ago, at %s",
-                instance["Endpoint"]["Address"],
-                result["db_last_command_time"],
+                f'{instance["Endpoint"]["Address"]}: Processed last command less than 1 hour ago, at {result["db_last_command_time"]}'
             )
 
             # returns False because the instance is not idle
             return False
+
         else:
             # its been more than an hour since a command was executed
             # but how long has the server been up? if less than an hour, give it a stay of execution
@@ -61,10 +63,7 @@ def isIdle(instance, cursor, user):
             if int(uptimeResult["hours"]) < 1:
                 # started up less than an hour ago
                 logging.warning(
-                    "%s: Server has been online less than an hour.  Uptime is %s hours %s minutes",
-                    instance["Endpoint"]["Address"],
-                    uptimeResult["hours"],
-                    uptimeResult["minutes"],
+                    f'{instance["Endpoint"]["Address"]}: Server has been online less than an hour.  Uptime is {uptimeResult["hours"]} hours {uptimeResult["minutes"]} minutes'
                 )
 
                 # hasn't executed stuff since it came online, but hasn't been online long enough to really call it idle
@@ -72,21 +71,17 @@ def isIdle(instance, cursor, user):
             else:
                 # no commands in an hour and has been online for at least an hour, so its idle
                 logging.warning(
-                    "%s: Deemed idle.  Server has been up for %s hours %s minutes, last command executed %s",
-                    instance["Endpoint"]["Address"],
-                    uptimeResult["hours"],
-                    uptimeResult["minutes"],
-                    result["db_last_command_time"],
+                    f'{instance["Endpoint"]["Address"]}: Deemed idle.  Server has been up for {uptimeResult["hours"]} hours {uptimeResult["minutes"]} minutes, last command executed {result["db_last_command_time"]}'
                 )
 
                 return True
-    logging.error(
-        "%s: Database did not return result!", instance["Endpoint"]["Address"]
-    )
+
+    logging.error(f'{instance["Endpoint"]["Address"]}: Database did not return result!')
     return False
 
 
 def lambda_handler(event, context):
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     ssmClient = boto3.client("ssm")
     rds = boto3.client("rds", region_name="us-west-2")
 
@@ -99,21 +94,19 @@ def lambda_handler(event, context):
             for dbinstance in page["DBInstances"]:
                 if isIdleExempt(rds=rds, instance=dbinstance):
                     logging.warning(
-                        "%s: Instance is exempt from idle shutdown",
-                        dbinstance["Endpoint"]["Address"],
+                        f'{dbinstance["Endpoint"]["Address"]}: Instance is exempt from idle shutdown'
                     )
                 else:
                     logging.warning(
-                        "%s: Instance is NOT exempt from idle shutdown",
-                        dbinstance["Endpoint"]["Address"],
+                        f'{dbinstance["Endpoint"]["Address"]}: Instance is NOT exempt from idle shutdown'
                     )
 
                     rdsInstances.append(dbinstance)
 
     except Exception as e:
-        print("Failed to enumerate RDS instances. Traceback follows.")
-        print(str(e))
-        print("Exiting.")
+        logging.error("Failed to enumerate RDS instances. Traceback follows.")
+        logging.error(str(e))
+        raise
 
     # just to make sure this variable isn't unintentionally accessed later
     dbinstance = None
@@ -122,7 +115,7 @@ def lambda_handler(event, context):
     # if the instance is online, see if its been idle
     # if it has, turn it off
     for instance in rdsInstances:
-        logging.warning("%s: Checking instance", instance["Endpoint"]["Address"])
+        logging.warning(f'{instance["Endpoint"]["Address"]}: Checking instance')
 
         # check if its online
         if instance["DBInstanceStatus"] == "available":
@@ -155,24 +148,26 @@ def lambda_handler(event, context):
                             rds.stop_db_instance(
                                 DBInstanceIdentifier=instance["DBInstanceIdentifier"]
                             )
-                            print(
-                                "%s: Instance is idle.  Successfully issued shutdown command.",
-                                instance["Endpoint"]["Address"],
+                            logging.warning(
+                                f'{instance["Endpoint"]["Address"]}: Instance is idle.  Successfully issued shutdown command.'
                             )
+
                         except Exception as e:
-                            print(
-                                "%s: Failed to stop RDS instance. Traceback follows.",
-                                instance["Endpoint"]["Address"],
+                            logging.error(
+                                f'{instance["Endpoint"]["Address"]}: Failed to stop RDS instance. Traceback follows.'
                             )
-                            print(str(e))
+
+                            logging.error(str(e))
+                            raise
+
                     else:
                         logging.warning(
-                            "%s: Instance not idle.  Skipping.",
-                            instance["Endpoint"]["Address"],
+                            f'{instance["Endpoint"]["Address"]}: Instance not idle.  Skipping.'
                         )
         else:
             # skipping instance, its not powered on
             logging.warning(
-                "%s: Instance is not powered on.  Ignoring.",
-                instance["Endpoint"]["Address"],
+                f'{instance["Endpoint"]["Address"]}: Instance is not powered on.  Ignoring.'
             )
+
+    return {"statusCode": 200, "body": json.dumps("Success")}

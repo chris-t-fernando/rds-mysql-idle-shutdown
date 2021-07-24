@@ -18,6 +18,8 @@ Resources:
       Handler: app.lambda_handler
       Policies: arn:aws:iam::036372598227:policy/rds-idle-shutdown
       Runtime: python3.8
+      Tags:
+        Project: "platform"
       VpcConfig:
         SecurityGroupIds:
           - sg-8b5c50ee
@@ -30,14 +32,3 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: rate(1 hour)
-
-Outputs:
-  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
-  # Find out more about other implicit resources you can reference within SAM
-  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  HelloWorldFunction:
-    Description: "Hello World Lambda Function ARN"
-    Value: !GetAtt IdleRDSShutdownFunction.Arn
-  HelloWorldFunctionIamRole:
-    Description: "Implicit IAM Role created for Hello World function"
-    Value: !GetAtt IdleRDSShutdownFunctionRole.Arn

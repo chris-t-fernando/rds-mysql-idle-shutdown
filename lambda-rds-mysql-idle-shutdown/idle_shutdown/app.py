@@ -1,8 +1,8 @@
 import pymysql.cursors
-import boto3
 import logging, sys
 import math
 import json
+import boto3
 
 # handler for pulling config from SSM
 def getSSMParameter(ssmClient, path, encryptionOption=False):
@@ -84,6 +84,7 @@ def lambda_handler(event, context):
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     ssmClient = boto3.client("ssm")
     rds = boto3.client("rds", region_name="us-west-2")
+    # rds = boto3.client("rds-data")
 
     rdsInstances = []
 
@@ -171,3 +172,7 @@ def lambda_handler(event, context):
             )
 
     return {"statusCode": 200, "body": json.dumps("Success")}
+
+
+if __name__ == "__main__":
+    lambda_handler("", "")

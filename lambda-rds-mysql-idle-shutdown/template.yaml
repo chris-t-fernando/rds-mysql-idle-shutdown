@@ -20,15 +20,17 @@ Resources:
       Runtime: python3.8
       Tags:
         Project: "platform"
-      VpcConfig:
-        SecurityGroupIds:
-          - sg-8b5c50ee
-        SubnetIds:
-          - subnet-6577a03c
-          - subnet-a752c0c2
-          - subnet-325eee45
+      #      VpcConfig:
+      #        SecurityGroupIds:
+      #          - sg-8b5c50ee
+      #        SubnetIds:
+      #          - subnet-6577a03c
+      #          - subnet-a752c0c2
+      #          - subnet-325eee45
       Events:
         IdleRDSShutdown:
           Type: Schedule
           Properties:
             Schedule: rate(1 hour)
+      Layers:
+        - arn:aws:lambda:us-west-2:770693421928:layer:Klayers-python38-PyMySQL:4

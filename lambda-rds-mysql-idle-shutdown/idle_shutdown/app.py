@@ -128,7 +128,7 @@ def isIdle(instance, cursor, user):
 def lambda_handler(event, context):
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     ssmClient = boto3.client("ssm")
-    rds = boto3.client("rds", region_name="us-west-2")
+    rds = boto3.client("rds")
     # rds = boto3.client("rds-data")
 
     rdsInstances = []
